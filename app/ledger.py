@@ -1198,12 +1198,24 @@ async def adjust_reservation(
     409, as is a *new* adjustment on an expired or terminal reservation.  The
     original reservation-creation replay is unaffected: it keeps matching the
     creation-time payload even after a successful adjustment.
-    """
-    now_iso = utcnow().isoformat()
 
+    The single UTC validity instant is captured only *after* ``BEGIN
+    IMMEDIATE`` has been acquired, i.e. after this call has passed both the
+    process write lock and the SQLite write-lock queue.  Both the TTL check
+    (lazy expiry sweep) and the RDP budget occupancy are therefore judged at
+    that later instant.  A reservation whose TTL elapses while this
+    adjustment is queued behind another writer is lazily expired and rejected
+    with ``409 reservation_expired`` inside the same transaction: the live
+    epsilon/delta are never rewritten and no adjustment record is written for
+    a dead reservation.
+    """
     async with _write_lock():
         async with db.connect() as conn:
             await db.begin_immediate(conn)
+            # Judge TTL and budget occupancy against the instant the write
+            # transaction actually starts, never an instant sampled before
+            # lock queueing.
+            now_iso = utcnow().isoformat()
             try:
                 # Idempotency key first, so a retry replays the original
                 # record even when the reservation has since expired.
