@@ -725,8 +725,12 @@ curl -X POST \
 * 已到期（含被惰性清扫）或终态（`confirmed` / `released` / `rejected` /
   `expired`）的预留**不能调整** → `409`（错误码分别为
   `reservation_confirmed` / `reservation_released` / `reservation_rejected` /
-  `reservation_expired`）；预留不存在 → `404 reservation_not_found`，
-  数据集不存在 → `404 dataset_not_found`；
+  `reservation_expired`）；预留是否到期及预算占用只在调整请求**取得写锁
+  （`BEGIN IMMEDIATE`）之后**按同一个 UTC 时刻判定并在同一事务内惰性刷新：
+  即使该请求在进程写锁或 SQLite 写锁队列中等待到超过到期点，也不会返回
+  201、改写 `epsilon` / `delta` 或留下调整记录，而是返回
+  `409 reservation_expired`、配额不变、不写入调整记录；预留不存在 →
+  `404 reservation_not_found`，数据集不存在 → `404 dataset_not_found`；
 * 相同 `(dataset_id, adjustment_id)` + **相同负载**（同一 `reservation_id`
   与 `epsilon` / `delta`）重试：返回 `200` 与**首次裁定**（含拒绝）及其
   额度快照，`idempotent_replay=true`，额度只替换一次——即使预留此后已过期
@@ -1703,7 +1707,10 @@ delta / 跨预留同键 409、`adjustment_id` 按数据集隔离、缺失数据�
 确认以新额度生成申请且不双重扣减、释放按新额度归还、释放预测按新额度工作、与
 续期共存（额度变而到期时刻不变）、调整后的预留仍按原到期时刻被惰性清扫、原
 预留创建请求仍按创建时负载幂等（按调整后负载重放为 409）、其他预留的入库快照
-不被改写、20 路重复 `adjustment_id` 并发仅一条记录、10 路不同 `adjustment_id`
+不被改写、调整请求在写锁队列中等到预留到期后返回 `409 reservation_expired`
+（不改配额、不写调整记录、过期预留不占预算）、已提交的同 `adjustment_id`
+在写锁队列中等到到期后重放仍返回首次裁定且不重复调整、20 路重复
+`adjustment_id` 并发仅一条记录、10 路不同 `adjustment_id`
 并发串行生效，以及从 v6 schema 启动时自动迁移出 `reservation_adjustments` 表
 并回填 `original_epsilon` / `original_delta`。
 
